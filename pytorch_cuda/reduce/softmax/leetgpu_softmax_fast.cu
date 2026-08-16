@@ -15,11 +15,11 @@ __inline__ __device__ float warpReduceMax(float val) {
 }
 
 __inline__ __device__ float warpReduceSum(float val) {
-    val += __shfl_down_sync(0xffffffff, val, 16);
-    val += __shfl_down_sync(0xffffffff, val, 8);
-    val += __shfl_down_sync(0xffffffff, val, 4);
-    val += __shfl_down_sync(0xffffffff, val, 2);
-    val += __shfl_down_sync(0xffffffff, val, 1);
+    val += __shfl_xor_sync(0xffffffff, val, 16);
+    val += __shfl_xor_sync(0xffffffff, val, 8);
+    val += __shfl_xor_sync(0xffffffff, val, 4);
+    val += __shfl_xor_sync(0xffffffff, val, 2);
+    val += __shfl_xor_sync(0xffffffff, val, 1);
     return val;
 }
 
