@@ -20,8 +20,11 @@ element_wise/
 │   ├── cuda_ci.py                  # CUDA 实现（待补充）
 │   └── triton_ci.py                # Triton 实现（2D grid，RGBA 布局）
 └── image/                          # 性能测试结果截图
-    ├── vector_add.png
-    └── vector_add_correct_triton.png
+    ├── vector_add_result1.png
+    ├── vector_add_result2.png
+    ├── matrix_add_result1.png
+    ├── matrix_add_result2.png
+    └── matrix_add_result3.png
 ```
 
 ---
@@ -82,9 +85,9 @@ python triton_vector_correct.py
 
 测试结果如图：
 
-![vector_add 测试结果1](image/vector_add测试结果1.png)
+![vector_add 测试结果1](image/vector_add_result1.png)
 
-![vector_add 测试结果2](image/vector_add测试结果2.png)
+![vector_add 测试结果2](image/vector_add_result2.png)
 
 
 | 实现      | 版本                             | 时间 (ms) | 带宽 (GB/s) |
@@ -168,11 +171,11 @@ python pytorch_triton_ma_any_shape.py
 
 测试结果如图：
 
-![matrix_add 测试结果1](image/matrix_add测试结果1.png)
+![matrix_add 测试结果1](image/matrix_add_result1.png)
 
-![matrix_add 测试结果2](image/matrix_add测试结果2.png)
+![matrix_add 测试结果2](image/matrix_add_result2.png)
 
-![matrix_add 测试结果3](image/matrix_add测试结果3.png)
+![matrix_add 测试结果3](image/matrix_add_result3.png)
 
 | 实现        | 版本                                | 时间 (ms) | 带宽 (GB/s) |
 | --------- | --------------------------------- | ------- | --------- |
