@@ -1,10 +1,12 @@
 import torch
 import triton
 import triton.language as tl
-import time
 import numpy as np
 
-# 方案一：直接加法
+# 方案零：pytorch加法（out= 直接写结果，避免临时张量）
+def matrix_add_pytorch(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, M: int, N: int):
+    torch.add(a, b, out=c)
+# 方案一：直接加法, 矩阵当作一维数组处理
 @triton.jit
 def matrix_add_kernel(a, b, c, n_elements, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
@@ -39,10 +41,11 @@ def solve_triton_naive(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, N: int
 @triton.jit
 def matrix_add_kernel_1d(a_ptr, b_ptr, c_ptr, n_elements: tl.constexpr, BLOCK_SIZE: tl.constexpr, VEC_WIDTH: tl.constexpr):
     pid = tl.program_id(0)
-    block_start = pid * BLOCK_SIZE
+    block_start = pid * BLOCK_SIZE * VEC_WIDTH
     # None 就是 np.newaxis，用于添加新维度
+    # (BLOCK_SIZE, VEC_WIDTH) 2D tile：每行 VEC_WIDTH 个连续元素，
+    # 不 reshape，编译器把一行分给一个线程 -> 生成向量化访存
     offsets = block_start + tl.arange(0, BLOCK_SIZE)[:, None] * VEC_WIDTH + tl.arange(0, VEC_WIDTH)[None, :]
-    offsets = tl.reshape(offsets, (BLOCK_SIZE * VEC_WIDTH,))
 
     mask = offsets < n_elements
 
@@ -66,7 +69,7 @@ def solve_triton_1d(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, N: int):
         triton.Config({'BLOCK_M': 256, 'BLOCK_N': 256}, num_warps=8),
         triton.Config({'BLOCK_M': 512, 'BLOCK_N': 128}, num_warps=8),
         triton.Config({'BLOCK_M': 512, 'BLOCK_N': 256}, num_warps=8),
-        triton.Config({'BLOCK_M': 512, 'BLOCK_N': 512}, num_warps=8),
+        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 512}, num_warps=8),
     ],
     key=['N'],
 )
@@ -124,57 +127,68 @@ def benchmark(func, A, B, C, N, warmup=10, repeat=100):
         func(A, B, C, N)
     torch.cuda.synchronize()
 
-    # Benchmark
-    start = time.time()
+    # Benchmark（CUDA event 计时，取平均）
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
     for _ in range(repeat):
         func(A, B, C, N)
+    end.record()
     torch.cuda.synchronize()
-    end = time.time()
 
-    avg_time_ms = (end - start) / repeat * 10000
-    print(f"Average time: {avg_time_ms:.6f} ms.")
+    elapsed_time_ms = start.elapsed_time(end) / repeat
+    return elapsed_time_ms
 
-def verify_results(C_triton_naive, C_triton_1d, C_triton_2d):
-    if torch.allclose(C_triton_naive, C_triton_1d):
-        print("Triton 1D kernel results match Triton naive kernel.")
+def verify_results(C_pytorch, C_triton_naive, C_triton_1d, C_triton_2d):
+    if torch.allclose(C_pytorch, C_triton_naive):
+        print("Triton naive kernel results match PyTorch results.")
     else:
-        print("Triton 1D kernel results do NOT match Triton naive kernel.")
-
-    if torch.allclose(C_triton_naive, C_triton_2d):
-        print("Triton 2D kernel results match Triton naive kernel.")
+        print("Triton naive kernel results do NOT match PyTorch results.")
+    if torch.allclose(C_pytorch, C_triton_1d):
+        print("Triton 1D kernel results match PyTorch results.")
     else:
-        print("Triton 2D kernel results do NOT match Triton naive kernel.")
+        print("Triton 1D kernel results do NOT match PyTorch results.")
+
+    if torch.allclose(C_pytorch, C_triton_2d):
+        print("Triton 2D kernel results match PyTorch results.")
+    else:
+        print("Triton 2D kernel results do NOT match PyTorch results.")
 
 def main():
     device = torch.device('cuda')
 
-    N = 1 << 12 # 4096
+    # 构造数据
+    N = 1 << 13 # 8192
     A = torch.randn((N, N), device=device, dtype=torch.float32)
     B = torch.randn((N, N), device=device, dtype=torch.float32)
+    C_pytorch = torch.empty_like(A)
     C_triton_naive = torch.empty_like(A)
     C_triton_1d = torch.empty_like(A)
     C_triton_2d = torch.empty_like(A)
 
+    # 调用各个实现函数并验证结果
+    matrix_add_pytorch(A, B, C_pytorch, N)
     solve_triton_naive(A, B, C_triton_naive, N)
     solve_triton_1d(A, B, C_triton_1d, N)
     solve_triton_2d(A, B, C_triton_2d, N)
-    verify_results(C_triton_naive, C_triton_1d, C_triton_2d)
+    verify_results(C_pytorch, C_triton_naive, C_triton_1d, C_triton_2d)
 
     # 性能测试
-    print("\n开始性能测试 (预热 10 次，计时 100 次取平均)...\n")
-
-    time_pytorch = benchmark(solve_triton_naive, A, B, C_triton_naive, N)
+    time_pytorch = benchmark(matrix_add_pytorch, A, B, C_pytorch, N)
+    time_triton_naive = benchmark(solve_triton_naive, A, B, C_triton_naive, N)
     time_triton_1d = benchmark(solve_triton_1d, A, B, C_triton_1d, N)
     time_triton_2d = benchmark(solve_triton_2d, A, B, C_triton_2d, N)
 
     # 输出结果
-    print(f"Triton 直接加法:      {time_pytorch:.4f} ms")
-    print(f"Triton 1D 向量化:      {time_triton_1d:.4f} ms")
-    print(f"Triton 2D 块指针:      {time_triton_2d:.4f} ms")
+    print(f"PyTorch: {time_pytorch:.4f} ms")
+    print(f"Triton naive: {time_triton_naive:.4f} ms")
+    print(f"Triton 1D: {time_triton_1d:.4f} ms")
+    print(f"Triton 2D: {time_triton_2d:.4f} ms")
 
     # 计算加速比
     baseline = time_pytorch
-    print(f"\n相对于 Naive 的加速比:")
+    print(f"\n相对于 PyTorch 的加速比:")
+    print(f"  Triton naive: {baseline / time_triton_naive:.2f}x")
     print(f"  Triton 1D: {baseline / time_triton_1d:.2f}x")
     print(f"  Triton 2D: {baseline / time_triton_2d:.2f}x")
 
@@ -182,11 +196,13 @@ def main():
     bytes_per_element = 4  # float32
     total_bytes = 3 * N * N * bytes_per_element  # A读 + B读 + C写
     bw_pytorch = total_bytes / (time_pytorch / 1000) / 1e9
+    bw_triton_naive = total_bytes / (time_triton_naive / 1000) / 1e9
     bw_triton_1d = total_bytes / (time_triton_1d / 1000) / 1e9
     bw_triton_2d = total_bytes / (time_triton_2d / 1000) / 1e9
 
     print(f"\n估算内存带宽 (GB/s):")
-    print(f"  Triton Naive:  {bw_pytorch:.2f} GB/s")
+    print(f"  PyTorch: {bw_pytorch:.2f} GB/s")
+    print(f"  Triton naive:  {bw_triton_naive:.2f} GB/s")
     print(f"  Triton 1D: {bw_triton_1d:.2f} GB/s")
     print(f"  Triton 2D: {bw_triton_2d:.2f} GB/s")
 

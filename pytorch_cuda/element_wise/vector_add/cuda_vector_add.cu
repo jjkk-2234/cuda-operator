@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 
 // ==================== 三种 kernel ====================
 
@@ -67,6 +68,62 @@ void launch_grid_stride_vec4(const float* a, const float* b, float* c, int n) {
     add_grid_stride_vec4<<<grid, block>>>(a, b, c, n);
 }
 
+// ==================== 正确性校验 ====================
+
+int verify(void (*launch)(const float*, const float*, float*, int),
+           const char* name) {
+    int cases[] = {1, 2, 3, 100, 1023, 4096, 100000};  // 含非 4 倍数、非 256 倍数
+    int n_cases = sizeof(cases) / sizeof(cases[0]);
+    int ok = 1;
+
+    for (int t = 0; t < n_cases; t++) {
+        int n = cases[t];
+        size_t bytes = (size_t)n * sizeof(float);
+
+        float* h_a = (float*)malloc(bytes);
+        float* h_b = (float*)malloc(bytes);
+        float* h_c = (float*)malloc(bytes);
+        float* h_ref = (float*)malloc(bytes);
+        for (int i = 0; i < n; i++) {
+            h_a[i] = (float)rand() / RAND_MAX;
+            h_b[i] = (float)rand() / RAND_MAX;
+            h_ref[i] = h_a[i] + h_b[i];
+        }
+
+        float *d_a, *d_b, *d_c;
+        cudaMalloc(&d_a, bytes);
+        cudaMalloc(&d_b, bytes);
+        cudaMalloc(&d_c, bytes);
+        cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_b, h_b, bytes, cudaMemcpyHostToDevice);
+
+        launch(d_a, d_b, d_c, n);
+        cudaDeviceSynchronize();
+
+        cudaMemcpy(h_c, d_c, bytes, cudaMemcpyDeviceToHost);
+
+        double max_diff = 0.0;
+        for (int i = 0; i < n; i++) {
+            double diff = fabs((double)h_c[i] - (double)h_ref[i]);
+            if (diff > max_diff) max_diff = diff;
+        }
+        if (max_diff > 1e-6) {
+            printf("%-24s  N=%d  FAIL  max_diff=%.3e\n", name, n, max_diff);
+            ok = 0;
+        }
+
+        cudaFree(d_a);
+        cudaFree(d_b);
+        cudaFree(d_c);
+        free(h_a);
+        free(h_b);
+        free(h_c);
+        free(h_ref);
+    }
+    if (ok) printf("%-24s  ALL PASS (7 种 N)\n", name);
+    return ok;
+}
+
 // ==================== 计时 + 带宽 ====================
 
 void benchmark(void (*launch)(const float*, const float*, float*, int),
@@ -99,6 +156,15 @@ void benchmark(void (*launch)(const float*, const float*, float*, int),
 // ==================== main ====================
 
 int main() {
+    // ==================== 正确性校验 ====================
+    int pass = 1;
+    pass &= verify(launch_naive, "add_naive");
+    pass &= verify(launch_grid_stride, "add_grid_stride");
+    pass &= verify(launch_grid_stride_vec4, "add_grid_stride_vec4");
+    printf("\n%s\n\n", pass ? "正确性校验：ALL PASS" : "正确性校验：SOME FAILED");
+    if (!pass) return 1;
+
+    // ==================== 性能测试 ====================
     int N = 1 << 26;  // 64 M，远超 L2，主要测的是 HBM 带宽
     size_t bytes = (size_t)N * sizeof(float);
 

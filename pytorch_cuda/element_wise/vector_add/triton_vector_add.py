@@ -44,7 +44,20 @@ def add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     add_kernel[grid](x, y, out, N)
     return out
 
+def verify():
+    print("========== 正确性校验（多形状，含非整除 N） ==========")
+    for n in [1, 2, 3, 100, 1023, 4096, 100000]:
+        a = torch.randn(n, device='cuda', dtype=torch.float32)
+        b = torch.randn(n, device='cuda', dtype=torch.float32)
+        c = add(a, b)
+        ref = a + b
+        ok = torch.allclose(c, ref)
+        print(f"N={n}: allclose={ok}")
+        assert ok, f"N={n} 校验失败"
+    print("正确性校验：ALL PASS\n")
+
 def main():
+    verify()
     N = 1 << 26
     a = torch.randn(N, device='cuda', dtype=torch.float32)
     b = torch.randn(N, device='cuda', dtype=torch.float32)

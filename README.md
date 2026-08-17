@@ -36,12 +36,14 @@
 
 | 子目录                | 文件                             | 说明                                                    |
 | ------------------ | ------------------------------ | ----------------------------------------------------- |
-| `vector_add/`      | `cuda_vector_add.cu`           | CUDA 向量加法 kernel（naive / grid-stride / float4，含计时+带宽） |
-|                    | `pytorch_vector_add.py`        | PyTorch 实现对照                                          |
-|                    | `triton_vector_add.py`         | Triton 实现对照（autotune）                                 |
-|                    | `triton_vector_add_correct.py` | Triton 修正计时版（CUDA event）                              |
-| `matrix_addition/` | `cuda_ma.cu`                   | CUDA 矩阵加法（naive / grid-stride / float4 / 2D-grid）     |
-|                    | `triton_ma.py`                 | Triton 矩阵加法（naive / 1D / 2D + benchmark）              |
+| `vector_add/`      | `cuda_vector_add.cu`           | CUDA 向量加法（naive / grid-stride / float4，含正确性校验+计时+带宽） |
+|                    | `pytorch_vector_add.py`        | PyTorch 参考实现（CUDA event 计时）                          |
+|                    | `triton_vector_add.py`         | Triton 实现（autotune + 正确性校验）                          |
+|                    | `triton_vector_correct.py`     | Triton 修正计时版（CUDA event，规避 time.time() 开销）           |
+| `matrix_addition/` | `cuda_ma_1d.cu`                | CUDA 矩阵加法 1D（naive / grid-stride / float4，含测试）        |
+|                    | `cuda_ma_2d.cu`                | CUDA 矩阵加法 2D grid（add_2d / add_2d_grid_stride，含测试）    |
+|                    | `pytorch_triton_ma.py`         | PyTorch + Triton 矩阵加法（naive / 1D / 2D，方阵版）           |
+|                    | `pytorch_triton_ma_any_shape.py` | PyTorch + Triton 矩阵加法（任意形状 + 多形状正确性校验）        |
 | `color inversion/` | `cuda_ci.py`                   | CUDA 颜色反相（待实现）                                        |
 |                    | `triton_ci.py`                 | 图像颜色反相（Triton）                                        |
 

@@ -43,6 +43,18 @@ def add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     add_kernel[grid](x, y, out, N)
     return out
 
+def verify():
+    print("========== 正确性校验（多形状，含非整除 N） ==========")
+    for n in [1, 2, 3, 100, 1023, 4096, 100000]:
+        a = torch.randn(n, device='cuda', dtype=torch.float32)
+        b = torch.randn(n, device='cuda', dtype=torch.float32)
+        c = add(a, b)
+        ref = a + b
+        ok = torch.allclose(c, ref)
+        print(f"N={n}: allclose={ok}")
+        assert ok, f"N={n} 校验失败"
+    print("正确性校验：ALL PASS\n")
+
 # 用 CUDA event 计时：预热 + 多次重复取平均，避免 time.time() 包含的
 # Python 启动/autotune 开销，得到真正的 kernel 执行时间
 def benchmark_add(n_warmup=5, n_repeat=20):
@@ -67,6 +79,7 @@ def benchmark_add(n_warmup=5, n_repeat=20):
     elapsed_time_ms = start.elapsed_time(end) / n_repeat
     return elapsed_time_ms, N
 
+verify()
 ms, N = benchmark_add()
 # 计算有效带宽
 bytes_total = 3 * N * 4
