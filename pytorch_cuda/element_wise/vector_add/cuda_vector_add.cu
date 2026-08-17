@@ -99,7 +99,7 @@ void benchmark(void (*launch)(const float*, const float*, float*, int),
 // ==================== main ====================
 
 int main() {
-    int N = 1 << 26;  // 约 805MB，远超 L2，主要测的是 HBM 带宽
+    int N = 1 << 26;  // 64 M，远超 L2，主要测的是 HBM 带宽
     size_t bytes = (size_t)N * sizeof(float);
 
     float* h_a = (float*)malloc(bytes);

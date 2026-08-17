@@ -22,7 +22,7 @@
 
 ## 环境选择
 
-本仓库所有算子均在华为云modelarts上运行和测试，使用cuda版本为12.4
+本仓库所有算子均在华为云 modelarts 上运行和测试，GPU 为 Tesla P100-PCIE-16GB（理论峰值带宽 732 GB/s），CUDA 版本 12.4
 
 ---
 
@@ -34,14 +34,16 @@
 > 
 > 初步掌握基本的优化方式：grid-loop，向量化访存
 
-| 子目录                | 文件                      | 说明               |
-| ------------------ | ----------------------- | ---------------- |
-| `vector_add/`      | `cuda_vector_add.cu`    | CUDA 向量加法 kernel |
-|                    | `pytorch_vector_add.py` | PyTorch 实现对照     |
-|                    | `triton_vector_add.py`  | Triton 实现对照      |
-| `matrix_addition/` | `cuda_ma.cu`            | CUDA 矩阵加法        |
-|                    | `triton_ma.py`          | Triton 矩阵加法      |
-| `color inversion/` | `triton_ci.py`          | 图像颜色反相（Triton）   |
+| 子目录                | 文件                             | 说明                                                    |
+| ------------------ | ------------------------------ | ----------------------------------------------------- |
+| `vector_add/`      | `cuda_vector_add.cu`           | CUDA 向量加法 kernel（naive / grid-stride / float4，含计时+带宽） |
+|                    | `pytorch_vector_add.py`        | PyTorch 实现对照                                          |
+|                    | `triton_vector_add.py`         | Triton 实现对照（autotune）                                 |
+|                    | `triton_vector_add_correct.py` | Triton 修正计时版（CUDA event）                              |
+| `matrix_addition/` | `cuda_ma.cu`                   | CUDA 矩阵加法（naive / grid-stride / float4 / 2D-grid）     |
+|                    | `triton_ma.py`                 | Triton 矩阵加法（naive / 1D / 2D + benchmark）              |
+| `color inversion/` | `cuda_ci.py`                   | CUDA 颜色反相（待实现）                                        |
+|                    | `triton_ci.py`                 | 图像颜色反相（Triton）                                        |
 
 ## 2. 归约算子 Reduce
 

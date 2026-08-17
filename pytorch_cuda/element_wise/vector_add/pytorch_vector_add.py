@@ -28,7 +28,7 @@ def benchmark_add(func, *args, name="Add", n_warmup=5, n_repeat=20):
 
 ms = benchmark_add(lambda x, y: x + y, a, b, name="PyTorch Add")
 
-# 计算有效带宽(这里指的是
+# 计算有效带宽
 bytes_total = 3 * N * 4
 bw = (bytes_total / 1e9) / (ms / 1000.0)
 

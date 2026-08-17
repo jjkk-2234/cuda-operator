@@ -1,7 +1,6 @@
 import torch
 import triton
 import triton.language as tl
-import time
 # 用于自动调优BLOCK_SIZE
 @triton.autotune(
     configs=[
@@ -44,23 +43,32 @@ def add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     add_kernel[grid](x, y, out, N)
     return out
 
-def main():
+# 用 CUDA event 计时：预热 + 多次重复取平均，避免 time.time() 包含的
+# Python 启动/autotune 开销，得到真正的 kernel 执行时间
+def benchmark_add(n_warmup=5, n_repeat=20):
     N = 1 << 26
     a = torch.randn(N, device='cuda', dtype=torch.float32)
     b = torch.randn(N, device='cuda', dtype=torch.float32)
 
-    c = add(a, b)
+    # 预热（autotune 也在此期间完成并选好最优 config）
+    for _ in range(n_warmup):
+        add(a, b)
     torch.cuda.synchronize()
-    start = time.time()
-    c = add(a, b)
+
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+
+    start.record()
+    for _ in range(n_repeat):
+        add(a, b)
+    end.record()
     torch.cuda.synchronize()
-    end = time.time()
 
-    elapsed_time_ms = (end - start) * 1000
+    elapsed_time_ms = start.elapsed_time(end) / n_repeat
+    return elapsed_time_ms, N
 
-    ms = elapsed_time_ms
-    bytes_total = 3 * N * 4
-    bw = (bytes_total / 1e9) / (ms / 1000.0)
-    print(f"Triton Add: {ms:.3f} ms, Bandwidth: {bw:.3f} GB/s")
-
-main()
+ms, N = benchmark_add()
+# 计算有效带宽
+bytes_total = 3 * N * 4
+bw = (bytes_total / 1e9) / (ms / 1000.0)
+print(f"Triton Add: {ms:.3f} ms, Bandwidth: {bw:.3f} GB/s")
