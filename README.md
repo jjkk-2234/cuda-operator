@@ -29,7 +29,9 @@
 ## 1. 逐元素算子 Element-wise
 
 > 初步掌握 CUDA 编程模型：`grid` / `block` / `thread` 的组织方式，以及 `blockIdx`、`threadIdx`、`blockDim`、`gridDim` 四个内置变量。
+> 
 > 初步掌握核函数的调用方式：kernel<<<gridDim, blockDim>>>();
+> 
 > 初步掌握基本的优化方式：grid-loop，向量化访存
 
 | 子目录                | 文件                      | 说明               |
@@ -134,7 +136,8 @@
 
 ## 参考
 
-- [CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/)
-- [CUDA 矩阵乘法详解系列](https://dlog.com.cn/posts/cuda11/matmul/)
-- [LeetGPU](https://github.com/lyclyc52/LeetGPU)
-- [Triton Matrix Multiplication Tutorial](https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html)
+- 网页版[CUDA Programming Guide](https://docs.nvidia.com/cuda/cuda-programming-guide/)，pdf版[cuda-programming-guide](pdf/cuda-programming-guide.pdf)
+- pdf版[programming-massively-parallel-processors](pdf/programming-massively-parallel-processors-a-hands-on-approach-4th-edition.pdf)
+- 仓库[LeetGPU](https://github.com/AlphaGPU/leetgpu-challenges)，网页版[LeetGPU](https://leetgpu.com/)
+- 博客[杜子源](https://dlog.com.cn/posts/cuda11/matmul/)
+- 仓库[AIInfraGuide](https://github.com/caomaolufei/AIInfraGuide)
