@@ -1,6 +1,6 @@
 # cuda-operator
 
-> 个人 CUDA 算子练习仓库。从逐元素算子到矩阵乘法，从朴素实现到共享内存 / 寄存器分块（Tiling），一步一步解锁 GPU 编程的优化之路。
+> 个人 CUDA 算子练习仓库。从逐元素算子到attention，从朴素实现到共享内存 / 寄存器分块（Tiling），一步一步解锁 GPU 编程的优化之路。
 
 [![Language](https://img.shields.io/badge/language-CUDA%20%2F%20C%2B%2B-76b900)](https://developer.nvidia.com/cuda-toolkit)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.x-ee4c2c)](https://pytorch.org/)
@@ -20,20 +20,26 @@
 - [编译加载方式 PyTorch C++ Extension](#7-编译加载方式-pytorch-c-extension)
 - [学习路线](#学习路线)
 
+## 环境选择
+
+本仓库所有算子均在华为云modelarts上运行和测试，使用cuda版本为12.4
+
 ---
 
 ## 1. 逐元素算子 Element-wise
 
 > 初步掌握 CUDA 编程模型：`grid` / `block` / `thread` 的组织方式，以及 `blockIdx`、`threadIdx`、`blockDim`、`gridDim` 四个内置变量。
+> 初步掌握核函数的调用方式：kernel<<<gridDim, blockDim>>>();
+> 初步掌握基本的优化方式：grid-loop，向量化访存
 
-| 子目录 | 文件 | 说明 |
-| --- | --- | --- |
-| `vector_add/` | `vector_add.cu` | CUDA 向量加法 kernel |
-| | `pytorch_vector_add.py` | PyTorch 实现对照 |
-| | `triton_naive.py` | Triton 实现对照 |
-| `matrix_addition/` | `cuda_ma.cu` | CUDA 矩阵加法 |
-| | `triton_ma.py` | Triton 矩阵加法 |
-| `color inversion/` | `tritonJ_ci.py` | 图像颜色反相（Triton） |
+| 子目录                | 文件                      | 说明               |
+| ------------------ | ----------------------- | ---------------- |
+| `vector_add/`      | `cuda_vector_add.cu`    | CUDA 向量加法 kernel |
+|                    | `pytorch_vector_add.py` | PyTorch 实现对照     |
+|                    | `triton_vector_add.py`  | Triton 实现对照      |
+| `matrix_addition/` | `cuda_ma.cu`            | CUDA 矩阵加法        |
+|                    | `triton_ma.py`          | Triton 矩阵加法      |
+| `color inversion/` | `triton_ci.py`          | 图像颜色反相（Triton）   |
 
 ## 2. 归约算子 Reduce
 

@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 import time
-
+# 用于自动调优BLOCK_SIZE
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_SIZE': 256}, num_warps=4),
@@ -44,8 +44,8 @@ def add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     add_kernel[grid](x, y, out, N)
     return out
 
-def main():
-    N = 1 << 27
+def benchmark_add():
+    N = 1 << 26
     a = torch.randn(N, device='cuda', dtype=torch.float32)
     b = torch.randn(N, device='cuda', dtype=torch.float32)
 
@@ -56,7 +56,11 @@ def main():
     torch.cuda.synchronize()
     end = time.time()
 
-    print(f"Time : {end - start:.3f} seconds.")
+    elapsed_time_ms = (end - start) * 1000
+    return elapsed_time_ms
 
-if __name__ == '__main__':
-    main()
+ms = benchmark_add()
+# 计算有效带宽
+bytes_total = 3 * N * 4
+bw = (bytes_total / 1e9) / (ms / 1000.0)
+print(f"Triton Add: {ms:.3f} ms, Bandwidth: {bw:.3f} GB/s")
