@@ -17,7 +17,7 @@ element_wise/
 │   ├── pytorch_triton_ma.py        # PyTorch + Triton（naive / 1D / 2D），方阵版
 │   └── pytorch_triton_ma_any_shape.py  # 同上，支持任意形状 + 多形状正确性校验
 ├── color inversion/                # 图像颜色反相：像素级运算（RGB 通道）
-│   ├── cuda_ci.py                  # CUDA 实现（待补充）
+│   ├── cuda_ci.cu                  # CUDA：1D grid-stride + uchar4 按像素反相
 │   └── triton_ci.py                # Triton 实现（2D grid，RGBA 布局）
 └── image/                          # 性能测试结果截图
     ├── vector_add_result1.png
@@ -217,47 +217,40 @@ python pytorch_triton_ma_any_shape.py
 
 ### 涉及知识
 
+> color inversion 本质上就是"图像版的矩阵加法"：每个输出像素只依赖对应输入像素，同为 element-wise + memory-bound，1D / 2D 两种映射思路完全通用。
+
 #### PyTorch 知识
 
-- **图像张量化**：图像可用 `uint8` 张量表示，反相即 `255 - img`（参考实现，待补充）
+- **图像张量化**：图像可用 `uint8` 张量表示，反相即 `255 - img`（参考实现）
 
-#### CUDA 知识
+#### CUDA 知识（`cuda_ci.cu`：1D 角度）
 
-- **`cuda_ci.py` 尚未实现**，待补充；可用 2D grid 映射像素坐标
+- **1D + 像素向量化**：图像是连续字节数组，`num_pixels = width * height`，每个线程用一个 **`uchar4`**（正好一个像素 4 字节）处理一个像素——一次读写 4 字节，天然合并访问，且 `p.w`（alpha）不动就保证了只反相 RGB
+- **`uint8` 运算天然安全**：`255 - p.x` 的输入输出都在 `[0,255]`，任何类型域下都不会溢出；回绕只发生在中间值出界的写法（如 `-val`、`val * 2`），本算子用不到
+- **grid-stride**：`stride = gridDim.x * blockDim.x`，固定线程循环遍历全部像素
+- **就地修改（in-place）**：直接读改写同一块显存
 
-#### Triton 知识
+#### Triton 知识（`triton_ci.py`：2D 角度）
 
 - **2D grid**：`pid_x`、`pid_y` 对应图像的行、列分块
-- **通道布局**：RGBA 图像每个像素 4 个字节，地址 = `(row * width + col) * 4 + channel`，对 RGB 三个通道做 `255 - val`
+- **通道布局**：地址 = `(row * width + col) * 4 + channel`，循环 `for i in range(3)` 只处理 RGB 三通道
 - **二维 mask**：`(rx[:, None] < height) & (ry[None, :] < width)` 的广播掩码
 - **就地修改（in-place）**：直接读改写同一块显存
 
+> 对照矩阵加法：`cuda_ci.cu` ≈ `cuda_ma_1d` 的 grid-stride（1D 摊平 + 向量化访存），`triton_ci.py` ≈ `cuda_ma_2d` 的 2D 行-列映射；唯一多出来的点是通道布局与 alpha 处理。
+
 ---
 
-### 验证结果和性能对比
+### 实现思路
 
-**调用指令：**
+**两种角度对照：**
 
-```bash
-# Triton 版：提供 solve(image, width, height) 入口（leetgpu 风格），无独立 main，
-# 由外部测试框架调用；也可自行包一层 main 做基准测试
-python -c "import sys; sys.path.insert(0, 'color inversion'); import triton_ci"
-# CUDA 版：cuda_ci.py 尚未实现，待补充
-```
+| 角度 | CUDA 对应 | 关键点 |
+| --- | --- | --- |
+| 1D（摊平） | `cuda_ci.cu` ≈ `cuda_ma_1d` grid-stride | `uchar4` 按像素向量化，alpha 天然不动 |
+| 2D（行-列） | `triton_ci.py` ≈ `cuda_ma_2d` | 地址 = `(row*width+col)*4 + channel`，循环 3 次 |
 
-**测试数据：**
-
-**性能对比（图像 4096x4096 RGBA ≈ 67MB，in-place 读改写，读写共 134MB）：**
-
-> GPU：Tesla P100-PCIE-16GB，理论峰值带宽 **732 GB/s**（数据均为示例，请以实际运行结果为准）
-
-| 实现 | 版本 | 时间 (ms) | 带宽 (GB/s) |
-| --- | --- | --- | --- |
-| Triton | `invert_kernel` (2D block 32x32) | 0.25 | 536 |
-| CUDA | `cuda_ci.py`（待实现） | - | - |
-| 参考 | 理论峰值 | - | 732.0 |
-
-> 说明：颜色反相是逐像素操作，in-place 读一次、写一次（共 2 倍图像字节）；带宽同样受 HBM 限制，合理区间 ~500~550 GB/s。二维 block 分块主要影响 tile 大小与索引开销，对带宽影响不大。
+> 与矩阵加法的差异只有两点：数据类型是 `uint8`（`255 - val` 范围天然在 `[0,255]`，不会溢出）；RGBA 的 alpha 通道不参与反相。
 
 ---
 

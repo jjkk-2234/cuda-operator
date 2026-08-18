@@ -29,10 +29,7 @@ def solve(image: torch.Tensor, width: int, height: int):
     BLOCK_SIZE_X = 32
     BLOCK_SIZE_Y = 32
 
-    grid = (
-        triton.cdiv(height, BLOCK_SIZE_X),
-        triton.cdiv(width, BLOCK_SIZE_Y),
-    )
+    grid = (triton.cdiv(height, BLOCK_SIZE_X), triton.cdiv(width, BLOCK_SIZE_Y))
     invert_kernel[grid](image, width, height, BLOCK_SIZE_X, BLOCK_SIZE_Y)
 
     return image

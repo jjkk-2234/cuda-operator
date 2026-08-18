@@ -44,8 +44,8 @@
 |                    | `cuda_ma_2d.cu`                | CUDA 矩阵加法 2D grid（add_2d / add_2d_grid_stride，含测试）    |
 |                    | `pytorch_triton_ma.py`         | PyTorch + Triton 矩阵加法（naive / 1D / 2D，方阵版）           |
 |                    | `pytorch_triton_ma_any_shape.py` | PyTorch + Triton 矩阵加法（任意形状 + 多形状正确性校验）        |
-| `color inversion/` | `cuda_ci.py`                   | CUDA 颜色反相（待实现）                                        |
-|                    | `triton_ci.py`                 | 图像颜色反相（Triton）                                        |
+| `color inversion/` | `cuda_ci.cu`                   | CUDA 颜色反相（1D grid-stride + uchar4 按像素）                 |
+|                    | `triton_ci.py`                 | 图像颜色反相（2D grid，RGBA 布局）                             |
 
 ## 2. 归约算子 Reduce
 
