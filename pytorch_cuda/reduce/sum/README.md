@@ -104,7 +104,7 @@ python torch_sum.py
 
 测试结果如图：
 
-![sum测试结果](sum_test_result.png)
+![sum测试结果](image/sum_test_result.png)
 
 | 实现      | 版本                                | 时间 (ms) | 带宽 (GB/s) |
 | ------- | --------------------------------- | ------- | --------- |
