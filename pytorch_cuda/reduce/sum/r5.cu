@@ -1,45 +1,57 @@
-#include<cuda_runtime.h>
-#include<stdio.h>
+#include <cuda_runtime.h>
+#include <stdio.h>
 
-// 使用volatile的原因
-//问：既然硬件已经保证了执行的先后顺序，为什么还需要 volatile？
-//因为硬件保证不了编译器会老老实实地把每次读写都落到共享内存上。
-// 编译器会做一种非常激进的优化：把频繁访问的共享内存变量缓存在寄存器里。
-// 比如下面的smem[tid]
-// volatile 告诉编译器每次用到这个变量时，必须从共享内存里老老实实地读写。
-// 加上这个关键字之后，编译器不再对 smem 指向的地址做任何寄存器和缓存优化。
-// 每一步累加都从共享内存里取最新的数据，算完再立刻写回去。warp 内部的线程能保证它们看到彼此的最新写入，计算也就完全正确了。
-// 
-__device__ void warpReduce_v4(volatile float* smem, int tid) {
-    // warp 内的 32 条线程在硬件上是锁步执行的，用人话来说，它们同步同一条指令。
-    // 这就意味着只要让前 32 个线程一起进入这个函数，
-    // 它们内部的每一步加法对外都是天然同步的，不存在写后读的风险，
-    // 也不需要显式同步。
-    smem[tid] += smem[tid + 32];
-    smem[tid] += smem[tid + 16];
-    smem[tid] += smem[tid + 8];
-    smem[tid] += smem[tid + 4];
-    smem[tid] += smem[tid + 2];
-    smem[tid] += smem[tid + 1];
+// 归约方案：warp shuffle（循环版）+ 共享内存汇集各 warp 结果
+// 与 r6.cu 的区别：r6 用 float4 向量化 + grid-stride + 手写 5 行 shfl；
+// 本版本每线程读 1 个元素，重点是展示 warp 内归约用循环 + #pragma unroll 展开，
+// 以及 block 内"warp 归约 → smem 汇集 → warp0 二次归约"的完整流程。
+
+// warp 归约：shfl_down 循环版，offset 16→8→4→2→1，#pragma unroll 展开为 5 条指令
+__device__ float reduce_warp(float val) {
+    #pragma unroll
+    for (unsigned int offset = 16; offset > 0; offset >>= 1) {
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    return val;
 }
 
-__global__ void reduce_v4(const float* in, float* out, int N) {
-    __shared__ float smem[1024];
-    const int BLOCK = 1024;
-    int tid = threadIdx.x;
-    int idx = blockIdx.x * (blockDim.x * 2) + tid;
-    float val1 = (idx < N) ? in[idx] : 0.0f;
-    float val2 = (idx + blockDim.x < N) ? in[idx + blockDim.x] : 0.0f;
-    smem[tid] = val1 + val2;
+// block 归约：
+// 1) 每个 warp 先归约到 lane0 的寄存器 val
+// 2) lane0 把结果写进 smem[wid]，__syncthreads 保证全部写完
+// 3) 前 numWarps 个线程读出各 warp 结果，warp0 再做一次归约
+// 注意：读 smem 之后不需要再 __syncthreads()——shfl 只发生在 warp0 内部（锁步），
+//       且 smem 只写一次，不存在"别人重写我正要读的数据"的 WAR 竞争
+__device__ float reduce_block(float val) {
+    __shared__ float smem[32];
+    int t = threadIdx.x;
+    int lane = t & 31;
+    int wid = t >> 5;
+
+    val = reduce_warp(val);
+
+    if (lane == 0) smem[wid] = val;
     __syncthreads();
 
-    for (int s = BLOCK >> 1; s > 32; s >>= 1) {
-        if (tid < s) smem[tid] += smem[tid + s];
-        __syncthreads();
-    }
-    // 为什么要单独拆分到最后64个元素的时候独立操作
-    // 因为要防止tid < 16的情况，否则发生warp divergence
-    if (tid < 32) warpReduce_v4(smem, tid);
-    __syncthreads();
-    if (tid == 0) atomicAdd(out, smem[0]);
+    int numWarps = blockDim.x >> 5;
+    val = (t < numWarps) ? smem[t] : 0.0f;
+
+    if (wid == 0) val = reduce_warp(val);
+    return val;
+}
+
+__global__ void reduce_kernel(const float* __restrict__ input, float* __restrict__ output, int N) {
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    // 越界补 0；必须所有线程无条件调用 reduce_block（内部有 __syncthreads，
+    // 放进分歧分支会导致部分线程到不了屏障而死锁）
+    float val = (idx < N) ? input[idx] : 0.0f;
+    float sum = reduce_block(val);
+    if (threadIdx.x == 0) atomicAdd(output, sum);
+}
+
+// input, output are device pointers
+extern "C" void solve(const float* input, float* output, int N) {
+    int blockSize = 1024;
+    int gridSize = (N + blockSize - 1) / blockSize;
+    cudaMemsetAsync(output, 0, sizeof(float));
+    reduce_kernel<<<gridSize, blockSize>>>(input, output, N);
 }

@@ -53,13 +53,16 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `sum.cu` | Warp 级归约（`__shfl_down_sync`） |
-| `r1.cu` | 归约 v0：朴素共享内存归约 |
-| `r2.cu` | 归约 v1：逐步优化 |
-| `r3.cu` | 归约 v2：逐步优化 |
-| `r4.cu` | 归约 v3：逐步优化 |
-| `r5.cu` | 引入 `volatile` 的优化 |
-| `r6.cu` | 最终版：cooperative groups + CUB |
+| `README.md` | 验证结果和性能分析（七版本对比） |
+| `cuda_sum.cu` | 七版本整合：`reduce_v0`~`reduce_v6` + 正确性校验 + 计时/带宽 |
+| `r1.cu` | 归约 v0：朴素共享内存归约（步长翻倍 + 取模） |
+| `r2.cu` | 归约 v1：显式索引（引入 bank conflict） |
+| `r3.cu` | 归约 v2：步长对折，消除 bank conflict |
+| `r4.cu` | 归约 v3：每线程 2 元素 |
+| `r5.cu` | 归约 v4：warp shuffle 循环版 + smem 汇集（每线程 1 元素） |
+| `r6.cu` | 归约 v5：two-pass 无原子（partial 数组 + 第二 kernel 归约） |
+| `r7.cu` | 归约 v6：grid-stride + float4 向量化 + warp shuffle |
+| `torch_sum.py` | PyTorch `torch.sum` 对比脚本（同规模、同计时口径） |
 
 ### 2.2 Softmax `softmax/`
 

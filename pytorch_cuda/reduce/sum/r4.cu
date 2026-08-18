@@ -28,9 +28,5 @@ __global__ void reduce_v3(const float* in, float* out, int N) {
         __syncthreads();
     }
     
-    // 什么是原子加法？ 
-    // 原子加法是指在多线程环境下，多个线程同时对同一个变量进行加法操作，而不会出现数据不一致的情况。
-    // 比如下面这个代码，多个线程同时对out进行加法操作，而不会出现数据不一致的情况。
-    // 并且smem[0]是每个block的归约结果，因此需要将每个block的归约结果累加到out中。
     if (tid == 0) atomicAdd(out, smem[0]);
 }

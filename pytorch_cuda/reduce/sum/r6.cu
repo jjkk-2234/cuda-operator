@@ -1,203 +1,69 @@
 #include <cuda_runtime.h>
-#include <cooperative_groups.h>
-#include <cub/cub.cuh>
-#include <cstdio>
-#include <cstdlib>
-#include <cmath>
-#include <limits>
+#include <stdio.h>
 
-namespace cg = cooperative_groups;
+// 不用原子操作的归约：two-pass（两段归约）方案，r5.cu 的无原子变体
+//
+// kernel1：每个 block 归约出局部和，普通写 partial[blockIdx.x]（各写各的槽位，无竞争）
+// kernel2：单 block 归约 partial 数组 → 最终结果（同样普通写 out[0]）
+//
+// 相比 r5.cu 的 atomicAdd：多一次 kernel 启动 + 多读写 gridDim 个 float，
+// 换来的是完全没有全局原子操作（block 数巨大时避免原子串行化，也更便于调试）
+//
+// 注意：output 需要能容纳 gridSize 个 float（kernel1 把它当 partial 缓冲用），
+//       不是 r5.cu 那样的 1 个 float。
 
-// ==================== Kernel 实现 ====================
-
-__device__ __forceinline__ float warpReduceSum(float val) {
-    unsigned mask = __activemask();
+// warp 归约：shfl_down 循环版（同 r5.cu）
+__device__ float reduce_warp(float val) {
     #pragma unroll
-    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-        val += __shfl_down_sync(mask, val, offset);
+    for (unsigned int offset = 16; offset > 0; offset >>= 1) {
+        val += __shfl_down_sync(0xffffffff, val, offset);
     }
     return val;
 }
 
-template <int BLOCK_SIZE>
-__global__ void reduceModern(const float* __restrict__ in,
-                             float* __restrict__ out,
-                             int N) {
-    extern __shared__ float smem[];
-    const int tid = threadIdx.x;
-    const int globalIdx = blockIdx.x * BLOCK_SIZE + tid;
+// block 归约：warp 归约 → smem 汇集 → warp0 二次归约（同 r5.cu）
+__device__ float reduce_block(float val) {
+    int t = threadIdx.x;
+    int lane = t & 31;
+    int wid = t >> 5;
 
-    // Grid-Stride Loop
-    float threadSum = 0.0f;
-    for (int idx = globalIdx; idx < N; idx += BLOCK_SIZE * gridDim.x) {
-        threadSum += in[idx];
-    }
+    __shared__ float smem[32];
+    val = reduce_warp(val);
 
-    // Warp级归约
-    float warpSum = warpReduceSum(threadSum);
-
-    // Block级归约
-    if ((tid % warpSize) == 0) {
-        smem[tid / warpSize] = warpSum;
-    }
+    if (lane == 0) smem[wid] = val;
     __syncthreads();
 
-    constexpr int NUM_WARPS = BLOCK_SIZE / 32;
-    if (tid < NUM_WARPS) {
-        warpSum = smem[tid];
-    } else {
-        warpSum = 0.0f;
-    }
+    int numWarps = blockDim.x >> 5;
+    val = (t < numWarps) ? smem[t] : 0.0f;
 
-    if (tid < 32) {
-        warpSum = warpReduceSum(warpSum);
-    }
-
-    if (tid == 0) {
-        atomicAdd(out, warpSum);
-    }
+    if (wid == 0) val = reduce_warp(val);
+    return val;
 }
 
-// ==================== 工具函数 ====================
-
-#define CUDA_CHECK(call)                                                       \
-    do {                                                                        \
-        cudaError_t err = call;                                                 \
-        if (err != cudaSuccess) {                                               \
-            fprintf(stderr, "CUDA Error at %s:%d: %s\n", __FILE__, __LINE__,   \
-                    cudaGetErrorString(err));                                    \
-            exit(EXIT_FAILURE);                                                 \
-        }                                                                       \
-    } while (0)
-
-// GPU高精度计时封装
-struct GpuTimer {
-    cudaEvent_t start, stop;
-    GpuTimer() {
-        CUDA_CHECK(cudaEventCreate(&start));
-        CUDA_CHECK(cudaEventCreate(&stop));
-    }
-    ~GpuTimer() {
-        CUDA_CHECK(cudaEventDestroy(start));
-        CUDA_CHECK(cudaEventDestroy(stop));
-    }
-    void begin() { CUDA_CHECK(cudaEventRecord(start)); }
-    float end() {
-        CUDA_CHECK(cudaEventRecord(stop));
-        CUDA_CHECK(cudaEventSynchronize(stop));
-        float ms = 0;
-        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-        return ms;
-    }
-};
-
-// CPU参考实现（使用double避免浮点累积误差过大）
-double cpuReduce(const float* data, int N) {
-    double sum = 0.0;
-    for (int i = 0; i < N; i++) sum += (double)data[i];
-    return sum;
+// kernel1：每 block 归约一个分块，局部和写入 partial[blockIdx.x]
+__global__ void reduce_kernel(const float* __restrict__ input, float* __restrict__ partial, int N) {
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    // 越界补 0；所有线程无条件调用 reduce_block（内部有 __syncthreads，进分支会死锁）
+    float val = (idx < N) ? input[idx] : 0.0f;
+    float sum = reduce_block(val);
+    if (threadIdx.x == 0) partial[blockIdx.x] = sum;   // 各 block 写各自槽位，无竞争
 }
 
-bool verifyResult(double gpuResult, double cpuResult, float relTol = 1e-4f) {
-    double diff = fabs(gpuResult - cpuResult);
-    double denom = fmax(fabs(cpuResult), 1.0);
-    bool pass = (diff / denom) < relTol;
-    printf("  CPU Reference : %.6f\n", cpuResult);
-    printf("  GPU Result    : %.6f\n", gpuResult);
-    printf("  Relative Error: %.2e  [%s]\n", diff / denom, pass ? "PASS ✓" : "FAIL ✗");
-    return pass;
+// kernel2：单 block 归约 partial 数组（gridSize 个元素）→ 最终结果
+__global__ void reduce_final(const float* __restrict__ partial, float* __restrict__ out, int nPart) {
+    int t = threadIdx.x;
+    float val = 0.0f;
+    // block 内 grid-stride：每线程累加多个 partial
+    for (int i = t; i < nPart; i += blockDim.x) val += partial[i];
+    val = reduce_block(val);
+    if (t == 0) out[0] = val;   // 普通写，无原子
 }
 
-// ==================== 主函数 ====================
-
-int main(int argc, char** argv) {
-    // 打印设备信息
-    cudaDeviceProp prop;
-    CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
-    printf("=== Device: %s ===\n", prop.name);
-    printf("  SM Count     : %d\n", prop.multiProcessorCount);
-    printf("  Mem Bandwidth: %.1f GB/s\n",
-           2.0 * prop.memoryClockRate * (prop.memoryBusWidth / 8) / 1e6);
-    printf("\n");
-
-    // 测试不同规模
-    const int sizes[] = {1 << 20, 1 << 24, 1 << 28}; // 1M, 16M, 256M
-    const int numSizes = sizeof(sizes) / sizeof(sizes[0]);
-    constexpr int BLOCK_SIZE = 256;
-    constexpr int WARMUP_ITERS = 10;
-    constexpr int BENCH_ITERS = 100;
-
-    for (int s = 0; s < numSizes; s++) {
-        int N = sizes[s];
-        size_t bytes = N * sizeof(float);
-        printf("--- N = %d (%.1f MB) ---\n", N, bytes / (1024.0 * 1024.0));
-
-        // 分配 & 初始化
-        float* h_in = new float[N];
-        for (int i = 0; i < N; i++) h_in[i] = static_cast<float>(rand()) / RAND_MAX - 0.5f;
-
-        float *d_in, *d_out;
-        CUDA_CHECK(cudaMalloc(&d_in, bytes));
-        CUDA_CHECK(cudaMalloc(&d_out, sizeof(float)));
-        CUDA_CHECK(cudaMemcpy(d_in, h_in, bytes, cudaMemcpyHostToDevice));
-
-        double cpuResult = cpuReduce(h_in, N);
-        size_t smemSize = (BLOCK_SIZE / 32) * sizeof(float);
-        int numBlocks = std::min((N + BLOCK_SIZE - 1) / BLOCK_SIZE, 
-                                 prop.multiProcessorCount * 4);
-
-        GpuTimer timer;
-        float customMs, cubMs;
-
-        // ===== Warmup =====
-        for (int i = 0; i < WARMUP_ITERS; i++) {
-            CUDA_CHECK(cudaMemset(d_out, 0, sizeof(float)));
-            reduceModern<BLOCK_SIZE><<<numBlocks, BLOCK_SIZE, smemSize>>>(d_in, d_out, N);
-        }
-        CUDA_CHECK(cudaDeviceSynchronize());
-
-        // ===== Benchmark: Custom Kernel =====
-        timer.begin();
-        for (int i = 0; i < BENCH_ITERS; i++) {
-            CUDA_CHECK(cudaMemset(d_out, 0, sizeof(float)));
-            reduceModern<BLOCK_SIZE><<<numBlocks, BLOCK_SIZE, smemSize>>>(d_in, d_out, N);
-        }
-        customMs = timer.end() / BENCH_ITERS;
-
-        // 验证正确性
-        float h_out;
-        CUDA_CHECK(cudaMemcpy(&h_out, d_out, sizeof(float), cudaMemcpyDeviceToHost));
-        printf("  [Custom] ");
-        verifyResult((double)h_out, cpuResult);
-        printf("  Avg Time: %.4f ms | BW: %.1f GB/s\n",
-               customMs, bytes / customMs / 1e6);
-
-        // ===== Benchmark: CUB (作为性能上限参考) =====
-        void* d_temp = nullptr;
-        size_t tempBytes = 0;
-        cub::DeviceReduce::Sum(d_temp, tempBytes, d_in, d_out, N);
-        CUDA_CHECK(cudaMalloc(&d_temp, tempBytes));
-
-        // Warmup CUB
-        for (int i = 0; i < WARMUP_ITERS; i++)
-            cub::DeviceReduce::Sum(d_temp, tempBytes, d_in, d_out, N);
-        CUDA_CHECK(cudaDeviceSynchronize());
-
-        timer.begin();
-        for (int i = 0; i < BENCH_ITERS; i++)
-            cub::DeviceReduce::Sum(d_temp, tempBytes, d_in, d_out, N);
-        cubMs = timer.end() / BENCH_ITERS;
-
-        printf("  [CUB]    Avg Time: %.4f ms | BW: %.1f GB/s\n",
-               cubMs, bytes / cubMs / 1e6);
-        printf("  Custom/CUB Ratio: %.2fx\n\n", customMs / cubMs);
-
-        // Cleanup
-        CUDA_CHECK(cudaFree(d_temp));
-        CUDA_CHECK(cudaFree(d_in));
-        CUDA_CHECK(cudaFree(d_out));
-        delete[] h_in;
-    }
-
-    return 0;
+// input, output are device pointers
+extern "C" void solve(const float* input, float* output, int N) {
+    int blockSize = 1024;
+    int gridSize = (N + blockSize - 1) / blockSize;
+    // 同一 stream 顺序执行：kernel2 保证在 kernel1 全部 block 完成后才启动
+    reduce_kernel<<<gridSize, blockSize>>>(input, output, N);   // output 当 partial 缓冲
+    reduce_final<<<1, blockSize>>>(output, N, gridSize);
 }
