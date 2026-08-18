@@ -114,7 +114,8 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `transpose/t.cu` | 矩阵转置（访存模式练习） |
+| `transpose/cuda_transpose.cu` | 矩阵转置：naive（写不合并）vs 共享内存 tile，含校验 + 计时 + 带宽 |
+| `transpose/pytorch_transpose.py` | 转置 PyTorch 参考实现（x.t().contiguous()，CUDA event 计时） |
 
 ## 7. 编译加载方式 PyTorch C++ Extension
 
