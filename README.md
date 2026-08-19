@@ -69,15 +69,9 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `softmax.cu` | 朴素 softmax |
-| `softmax_online.cu` | 在线（online）softmax：单遍计算 max + sum，FlashAttention 思路 |
-| `test_softmax_online.cu` | 在线 softmax 正确性测试 |
-| `leetgpu_softmax.cu` | LeetGPU 习题参考实现 |
-| `leetgpu_softmax_own.cu` | LeetGPU 习题自写实现 |
-| `leetgpu_softmax_fast.cu` | LeetGPU 习题快速版 |
-| `leetgpu_softmax_submit.cu` | LeetGPU 习题提交版 |
-| `torch_triton_softmax.py` | PyTorch vs Triton 性能对比 |
-| `torch_triton_softmax.ipynb` | 对比实验 notebook |
+| `softmax_1d.cu` | 1D softmax：online / two-pass / float4，含正确性校验+计时+带宽 |
+| `softmax_2d.cu` | 2D softmax：online / two-pass / float4，含正确性校验+计时+带宽 |
+| `torch_triton_softmax.py` | PyTorch vs Triton 性能对比（含多形状正确性校验） |
 
 ## 3. 扫描算子 Scan
 

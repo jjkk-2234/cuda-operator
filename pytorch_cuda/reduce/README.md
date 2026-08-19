@@ -155,3 +155,203 @@ python torch_sum.py
 
 #### 思考：
 > 为什么 `reduce_v2` 对折后 warp 内不再有 bank conflict？`__shfl_down_sync` 的 5 步为什么恰好够 32 线程？v4 每 block 只做一次 `atomicAdd`，相比 v0~v3 少了多少全局原子操作？
+
+---
+
+## Softmax 归一化指数
+
+> Softmax 是归约的经典应用：每行独立求 max、求 sum、再归一化。核心挑战是**数值稳定性**（大数 exp 溢出）与**访存效率**（每行两次访存 vs 单趟 online）。
+
+### 文件
+
+| 文件 | 说明 |
+| --- | --- |
+| `softmax_1d.cu` | 1D softmax：online / two-pass / float4，含正确性校验+计时+带宽 |
+| `softmax_2d.cu` | 2D softmax：online / two-pass / float4，含正确性校验+计时+带宽 |
+| `torch_triton_softmax.py` | PyTorch vs Triton 性能对比（含多形状正确性校验） |
+
+### 涉及知识
+
+#### 1. 数值稳定性：为什么不能直接 `exp(x) / sum(exp(x))`
+
+Softmax 公式：`y_i = exp(x_i) / sum_j(exp(x_j))`
+
+直接计算会**溢出**：若 `x_i = 100`，`exp(100)` 超出 float 范围（~3.4e38），结果为 `inf`。
+
+**正确做法**：利用 `exp(a - c) / exp(b - c) = exp(a) / exp(b)`，先减去行最大值：
+```
+y_i = exp(x_i - max(x)) / sum_j(exp(x_j - max(x)))
+```
+这样 `x_i - max(x) ≤ 0`，`exp` 结果在 `(0, 1]` 之间，不会溢出。
+
+**关键洞察**：减 max 不改变 softmax 结果（分子分母同除 `exp(max)`），但把数值范围从 `(-∞, +∞)` 压缩到 `(-∞, 0]`。
+
+#### 2. Two-Pass Softmax：先 max 后 sum
+
+```
+Pass 1: 求 max(x)          ← 一次归约
+Pass 2: 求 sum(exp(x - max))  ← 第二次归约
+Pass 3: 计算 exp(x - max) / sum  ← 逐元素除法
+```
+
+**访存分析**：每行读 2 次 input、写 1 次 output，共 **3 次访存**。
+
+**优点**：逻辑简单，max 和 sum 各自独立，易于理解。
+
+**缺点**：两遍访存，对 memory-bound 算子浪费带宽。
+
+#### 3. Online Softmax：单趟同时求 max 和 sum
+
+核心思想：遍历元素时**同时维护** running max `mm` 和 running sum `ss`，每次遇到更大的 max 时**修正历史 sum**。
+
+**推导过程**：
+
+设当前已处理元素的最大值为 `mm`，sum 为 `ss`（以 `mm` 为参照）。
+新元素 `x` 到来，新最大值为 `mnew = max(mm, x)`。
+
+- 若 `x ≤ mm`（`mnew = mm`）：`ss` 不变，新贡献 `exp(x - mm)` 直接加到 `ss`。
+- 若 `x > mm`（`mnew = x`）：旧 `ss` 是以 `mm` 为参照的，需缩放到 `mnew`：
+  ```
+  旧 ss = sum(exp(x_i - mm))
+  新 ss = sum(exp(x_i - mnew)) + exp(x - mnew)
+        = sum(exp(x_i - mm) * exp(mm - mnew)) + exp(x - mnew)
+        = ss * exp(mm - mnew) + exp(x - mnew)
+  ```
+
+**统一公式**（两种情况都适用）：
+```
+ss = ss * exp(mm - mnew) + exp(x - mnew)
+mm = mnew
+```
+
+**访存分析**：每行只读 1 次 input、写 1 次 output，共 **2 次访存**。比 two-pass 少一次。
+
+**代价**：每次迭代多一次 `exp` 修正（`exp(mm - mnew)`），但 memory-bound 下这额外计算被访存掩盖。
+
+#### 4. 跨 Block 归约：1D Softmax 的难点
+
+1D softmax 是**整个数组**一个 softmax，不是每行独立。当 N 很大时，一个 block 无法容纳所有元素，必须多 block 并行。
+
+**问题**：每个 block 只能算出**局部** max/sum，而 softmax 需要**全局** max/sum。
+
+**解法（三阶段）**：
+
+```
+Stage 1: 每个 block 算局部 (max, sum) → 写 partial 数组
+Stage 2: 单 block 归约 partial → 全局 (gmax, gsum)
+Stage 3: 用全局 (gmax, gsum) 归一化
+```
+
+**关键细节**：
+- Stage 1 的 sum 以**局部 max** 为参照，Stage 2 必须把各 block 的 sum **统一缩放到全局 gmax**：
+  ```
+  gsum = sum(partial_sum[i] * exp(partial_max[i] - gmax))
+  ```
+- 这一步的 `exp` 修正与 online 算法的修正本质相同：**不同参照系的 sum 必须对齐**。
+
+**实际数据**：2D `softmax_2d_vec4` 1.458 ms vs 1D `softmax_1d_vec4` 1.779 ms，2D 快 **18%**。
+
+**原因**：2D 每行独立，block 内归约即可完成，无需跨 block 归约；1D 必须三阶段，Stage 2（global reduce）的 kernel 启动开销不可忽略。
+
+#### 5. Online vs Two-Pass：性能差异取决于 kernel 启动开销
+
+| 指标 | Two-Pass | Online |
+|------|----------|--------|
+| 访存次数 | 3 次/行 | 2 次/行 |
+| exp 次数 | 2 次/元素 | 3 次/元素（含修正） |
+| 归约次数 | 2 次 | 1 次 |
+| 1D kernel 启动 | 4 次 | 3 次 |
+
+**实际数据（1D）：** online 1.894 ms vs two-pass 2.574 ms，online 快 **27%**。
+
+**差异原因**：
+- 1D softmax 必须跨 block 归约，two-pass 需要 4 次 kernel 启动（reduce_max → global_reduce_max → reduce_sum → global_reduce_sum → apply），online 只需 3 次（reduce → global_reduce → apply）
+- kernel 启动开销在 memory-bound 算子中占比显著，减少一次启动比减少一次访存更有效
+- 2D 场景下两者差异小（1.511 vs 2.046 ms），因为 2D 每行独立，无需跨 block 归约，kernel 启动开销被摊薄
+
+**关键洞察**：**kernel 启动开销 > 访存次数优化**。在 memory-bound 算子中，减少 kernel 启动次数比减少单次访存次数更有效。
+
+#### 6. 向量化访存：float4 的收益与局限
+
+**收益**：
+- 1D 场景：`softmax_1d_vec4` 301.9 GB/s vs `softmax_1d_online` 283.5 GB/s，提升 **6.5%**
+- 2D 场景：`softmax_2d_vec4` 368.1 GB/s vs `softmax_2d_online` 262.4 GB/s，提升 **40%**
+- 一次内存事务读 4 个 float（16 字节），指令数降为 1/4
+
+**局限**：
+- 2D 场景下 two-pass 与 vec4 带宽相同（368.1 GB/s）：two-pass 访存 3 次/行但每次读 1 个 float，vec4 访存 2 次/行但每次读 4 个 float，总访存量相同
+- 要求 input 16 字节对齐（`%4==0`），N 不是 4 的倍数时需尾部标量循环兜底
+- **memory-bound 下，向量化收益取决于访存模式**：2D 每行独立、连续访存，向量化收益大；1D 跨 block 归约有额外同步开销，收益被稀释
+
+#### 7. 2D Softmax 的 Block 映射
+
+2D softmax 每行独立，天然适合**每 block 处理一行**：
+```cpp
+int row = blockIdx.x;        // 一个 block 处理一行
+int tid = threadIdx.x;       // 线程内 grid-stride 遍历该行
+```
+
+**共享内存广播**：blockReduce 的结果只在 warp 0 有效，必须通过 `__shared__` 广播给所有线程：
+```cpp
+if (tid == 0) s_max = block_max;
+__syncthreads();
+block_max = s_max;  // 所有线程读取
+```
+
+**与 1D 的对比**：
+
+| 特性 | 1D Softmax | 2D Softmax |
+|------|-----------|-----------|
+| 归约范围 | 整个数组（跨 block） | 每行（block 内） |
+| 跨 block 归约 | 需要（三阶段） | 不需要 |
+| 适用场景 | 单向量 softmax | 注意力机制、分类头 |
+
+### 验证结果和性能对比
+
+**调用指令：**
+
+```bash
+# CUDA 1D 版：多形状正确性校验 + 性能/带宽
+nvcc -o softmax_1d softmax_1d.cu && ./softmax_1d
+# CUDA 2D 版：多形状正确性校验 + 性能/带宽
+nvcc -o softmax_2d softmax_2d.cu && ./softmax_2d
+# PyTorch + Triton 版：多形状正确性校验 + 性能/带宽
+python torch_triton_softmax.py
+```
+
+![softmax测试结果](image/softmax_test_result.png)
+
+**性能对比（8192×8192，float32，每矩阵 268MB）：**
+
+> GPU：Tesla P100-PCIE-16GB，理论峰值带宽 **732 GB/s**
+
+| 实现        | 版本                    | 时间 (ms) | 带宽 (GB/s) |
+| --------- | --------------------- | ------- | --------- |
+| CUDA (1D) | `softmax_1d_online`   | 1.894   | 283.5     |
+| CUDA (1D) | `softmax_1d_two_pass` | 2.574   | 208.6     |
+| CUDA (1D) | `softmax_1d_vec4`     | 1.779   | 301.9     |
+| CUDA (2D) | `softmax_2d_online`   | 1.511   | 262.4     |
+| CUDA (2D) | `softmax_2d_two_pass` | 2.046   | 368.1     |
+| CUDA (2D) | `softmax_2d_vec4`     | 1.458   | 368.1     |
+| PyTorch   | `torch.softmax`       | 1.922   | 279.4     |
+| Triton    | `softmax_fuse`        | 1.009   | 531.9     |
+| Triton    | `softmax_tile`        | 1.908   | 281.3     |
+| Triton    | `softmax_online`      | 1.425   | 376.7     |
+| 参考        | 理论峰值                  | -       | 732.0     |
+
+> **结果分析**：
+> - **Triton `softmax_fuse` 最快**（1.009 ms / 531.9 GB/s，理论峰值 73%）：单 kernel 融合 max+sum+归一化，无中间全局内存读写，带宽利用率最高
+> - **2D 版本整体快于 1D 版本**：2D 每行独立，block 内归约即可；1D 需三阶段（partial → global reduce → apply），多 kernel 启动开销显著
+> - **1D two-pass 最慢**（2.574 ms / 208.6 GB/s）：4 次 kernel 启动（reduce_max → global_reduce_max → reduce_sum → global_reduce_sum → apply），启动开销占比大
+> - **2D two-pass 与 vec4 带宽相同**（368.1 GB/s）：two-pass 访存 3 次/行，vec4 访存 2 次/行但每次 4×数据量，memory-bound 下带宽接近
+> - **1D online 比 two-pass 快 27%**（1.894 vs 2.574 ms）：online 少一次 global reduce kernel，但三阶段架构仍受启动开销拖累
+> - **float4 向量化在 1D 上有效**（301.9 vs 283.5 GB/s）：1D 三阶段中 Stage 1 和 Stage 3 的访存被向量化加速
+> - **所有 CUDA 版本带宽远低于 Triton fuse**：CUDA 多 kernel 架构导致中间结果必须写回全局内存，带宽被多次读写稀释
+
+### 个人见解
+
+#### 复述：
+Online Softmax 的核心思想是**单趟同时维护 running max 和 running sum**，通过 `ss = ss * exp(mm - mnew) + exp(x - mnew)` 修正历史 sum，避免两遍访存。1D softmax 的难点在于**跨 block 归约**：每个 block 只能算局部 max/sum，必须三阶段（partial → global reduce → apply）才能得到全局结果。
+
+#### 思考：
+> 为什么 1D two-pass 比 online 慢 27%？Triton `softmax_fuse` 带宽（531 GB/s）远超 CUDA 版本（208~368 GB/s），根本原因是什么？2D softmax 的 two-pass 和 vec4 带宽相同（368 GB/s），说明 memory-bound 下算法优化 vs 访存优化的取舍是什么？
