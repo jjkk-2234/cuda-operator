@@ -213,7 +213,92 @@ python pytorch_triton_ma_any_shape.py
 
 ---
 
-## 3. Color Inversion 图像颜色反相
+## 3. Reverse Array 数组反转
+
+### 涉及知识
+
+#### CUDA 知识
+
+- **反转操作的特殊性**：数组反转 `input[i] ↔ input[N-1-i]` 是 element-wise 算子的变种——每个输出元素依赖输入中对称位置的元素，但访存模式与加法不同：**读写都是对称的**
+- **合并访问的关键**：相邻线程访问相邻地址才是合并访问，与地址递增/递减无关
+  - 标量版本 `input[i] ↔ input[N-1-i]`：`input[i]` 侧是合并的（连续），`input[N-1-i]` 侧也是合并的（倒序连续）
+  - 错误版本 `in4[i].x ↔ input[N-1-4*i]`：`input[N-1-4*i]` 侧线程间地址跳跃 4 个 float，**非合并访问**，性能反而更差
+- **float4 向量化反转的正确姿势**：必须做**跨中心向量交换** `in4[i] ↔ in4[N/4-1-i]`，两边都是合并访问
+- **边界处理**：`N % 8 != 0` 时 float4 块与标量尾部可能重叠，需保证 `N % 8 == 0` 或用标量兜底
+
+#### 踩坑经验
+
+> **float4 版本不一定更快**：当前 `ra.cu` 中 float4 版本的问题在于 `input[N-1-id]` 侧是散列访问，抵消了 `in4[i]` 侧的合并优势。结论：memory-bound 算子中，朴素标量实现已能喂满带宽，向量化访存需保证两边都合并才有收益。
+
+---
+
+### 实现思路
+
+**三种 kernel 对照：**
+
+| 版本 | 特点 | 带宽 |
+|------|------|------|
+| `reverse_naive` | 每线程一个元素，简单直接 | ~550 GB/s |
+| `reverse_grid_stride_scalar` | 固定线程数循环，并行度受限 | ~490 GB/s |
+| `reverse_grid_stride_vec4` | 跨中心 float4 交换，两边合并 | ~550 GB/s |
+
+**与 matrix_addition 的对照：**
+
+| 算子 | 访存模式 | float4 收益 |
+|------|----------|-------------|
+| `matrix_addition` | 读 A + 读 B + 写 C，三路合并 | 无（naive 已喂满） |
+| `reverse_array` | 读 input[i] + 写 input[i] + 读 input[N-1-i] + 写 input[N-1-i]，四路 | 需保证两边合并才有收益 |
+
+---
+
+### 验证结果和性能对比
+
+**调用指令：**
+
+```bash
+# CUDA 版：多形状正确性校验（通过后才测性能）+ 三个 kernel 计时/带宽
+nvcc -o ra ra.cu && ./ra
+```
+
+**测试数据：**
+
+> 各实现均先做多形状正确性校验（含非 8 倍数 N），全部通过后才测性能。
+
+**性能对比（N = 2^26 个元素，float32，268MB）：**
+
+> GPU：Tesla P100-PCIE-16GB，理论峰值带宽 **732 GB/s**
+
+测试结果如图：
+
+![[Pasted image 20260819201604.png]]
+
+| 实现   | 版本                           | 时间 (ms) | 带宽 (GB/s) |
+| ---- | ---------------------------- | ------- | --------- |
+| CUDA | `reverse_naive`              | 0.996   | 539.0     |
+| CUDA | `reverse_grid_stride_scalar` | 1.114   | 481.9     |
+| CUDA | `reverse_grid_stride_vec4`   | 1.272   | 422.0     |
+| 参考   | 理论峰值                         | -       | 732.0     |
+
+> **结果分析**：
+> - `reverse_naive` 最快（539 GB/s，理论峰值 74%）：标量版本两边都是合并访问，朴素实现已喂满带宽
+> - `reverse_grid_stride_scalar` 中等（482 GB/s）：固定 grid 最大 1024 block，并行度不足
+> - `reverse_grid_stride_vec4` 最慢（422 GB/s）：**float4 版本反而比 naive 慢 28%**，验证了"单侧向量化导致另一侧散列"的分析——`input[N-1-id]` 侧线程间地址跳跃 4 个 float，非合并访问抵消了 `in4[i]` 侧的合并优势
+
+---
+
+### 个人见解
+
+#### 复述：
+数组反转的难点不在于算法，而在于**访存模式**：`input[i]` 侧合并，`input[N-1-i]` 侧也合并（倒序连续），但错误地用 `float4` 做单侧向量化会导致另一侧散列，反而更慢。
+
+**实测数据验证**：`reverse_grid_stride_vec4` 带宽仅 422 GB/s，比 `reverse_naive` 的 539 GB/s 低 28%。这说明 memory-bound 算子中，**朴素标量实现已能喂满带宽，向量化访存需保证两边都合并才有收益**。
+
+#### 思考：
+> 为什么 `reverse_array` 的 float4 版本需要跨中心交换，而 `matrix_addition` 的 float4 版本只需要单侧向量化？
+
+---
+
+## 4. Color Inversion 图像颜色反相
 
 ### 涉及知识
 
