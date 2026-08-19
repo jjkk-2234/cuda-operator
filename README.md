@@ -46,6 +46,7 @@
 |                    | `pytorch_triton_ma_any_shape.py` | PyTorch + Triton 矩阵加法（任意形状 + 多形状正确性校验）        |
 | `color inversion/` | `cuda_ci.cu`                   | CUDA 颜色反相（1D grid-stride + uchar4 按像素）                 |
 |                    | `triton_ci.py`                 | 图像颜色反相（2D grid，RGBA 布局）                             |
+| `reverse array/`   | `ra.cu`                        | CUDA 数组反转（naive / grid-stride / float4，含正确性校验+计时+带宽） |
 
 ## 2. 归约算子 Reduce
 
